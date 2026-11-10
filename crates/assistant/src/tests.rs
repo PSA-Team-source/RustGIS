@@ -112,6 +112,9 @@ fn first_keyed_provider_is_the_first_key_provider_and_never_a_sign_in() {
     // TrustedRouter comes after it, for the same reason.
     assert_eq!(first_keyed(keyed(&["trustedrouter", "requesty"])), Some("requesty"));
     assert_eq!(first_keyed(keyed(&["trustedrouter"])), Some("trustedrouter"));
+    // UberLLM comes last, for the same reason.
+    assert_eq!(first_keyed(keyed(&["uberllm", "trustedrouter"])), Some("trustedrouter"));
+    assert_eq!(first_keyed(keyed(&["uberllm"])), Some("uberllm"));
     assert_eq!(first_keyed(keyed(&[])), None);
 }
 
@@ -1000,6 +1003,17 @@ fn trustedrouter_lists_its_models_with_a_bearer_key() {
     assert_eq!(p.model, "trustedrouter/auto");
     let req = models_request(&cfg("trustedrouter"));
     assert_eq!(req.url, "https://api.trustedrouter.com/v1/models");
+    assert!(req.headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer k"));
+}
+
+#[test]
+fn uberllm_lists_its_models_with_a_bearer_key() {
+    let p = preset("uberllm").expect("UberLLM preset");
+    assert_eq!((p.api, p.keyless, p.login), (Api::OpenAi, false, false));
+    assert_eq!(p.key_env, &["UBERLLM_API_KEY"]);
+    assert_eq!(p.model, "anthropic/claude-sonnet-5.5");
+    let req = models_request(&cfg("uberllm"));
+    assert_eq!(req.url, "https://api.uberllm.dev/v1/models");
     assert!(req.headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer k"));
 }
 
