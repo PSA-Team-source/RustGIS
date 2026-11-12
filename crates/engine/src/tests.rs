@@ -26840,7 +26840,7 @@ fn layout_shapes_are_added_restyled_and_saved() {
     s.run("layout.update", &json!({"element": line, "dir": "rising", "color": "#123456"})).unwrap();
     let l = &s.project.layouts[li];
     match &l.element(circle).unwrap().kind {
-        ElementKind::Ellipse { fill, outline, width } => {
+        ElementKind::Ellipse { fill, outline, width, .. } => {
             assert_eq!((fill.hex(), outline.hex(), *width), ("#00FF00".into(), "#0000FF".into(), 0.0))
         }
         k => panic!("{k:?}"),
@@ -27823,6 +27823,8 @@ fn copied_history_replays_public_structured_parameters_without_changing_results(
 #[path = "../../../tests/support/ogc_server.rs"]
 mod ogc_server;
 
+mod ogc_dataset;
+
 #[path = "../../../tests/support/esripbf.rs"]
 mod esripbf_answers;
 
@@ -27918,7 +27920,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
     }
     let error = session.run("service.layers", &json!({"url":root,"text":link(&format!("{root}?f=json"))})).unwrap_err();
     assert!(error.contains("loop"), "{error}");
-    let docs: Vec<Value> = (1..=3)
+    let docs: Vec<Value> = (1..=31)
         .map(|n| {
             json!({
                 "url":format!("https://example.org/ogc/{n}"),
@@ -27927,7 +27929,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
         })
         .collect();
     let error = session.run("service.layers", &json!({"url":root,"text":link("https://example.org/ogc/1"),"documents":docs})).unwrap_err();
-    assert!(error.contains("four documents"), "{error}");
+    assert!(error.contains("32 documents"), "{error}");
     let docs = json!([
         {"url":"https://example.org/ogc/a","text":link("https://example.org/ogc/b")},
         {"url":"https://example.org/ogc/b","text":link("https://example.org/ogc/a")}
@@ -30877,6 +30879,60 @@ fn text_elements_take_italic_alignment_and_spacing() {
         assert!(s.run("layout.addElement", &add).is_err());
     }
     assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}
+
+/// Lines, arrows and the outlines of rectangles, ellipses and circles take a `dash` (#1763), read
+/// as a line layer's stroke reads one: kept through a save, `[]` or `null` solid again, refused
+/// when it isn't a pattern or for an element that draws no line, with nothing changed.
+#[test]
+fn lines_and_outlines_take_a_dash() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Dashes"})).unwrap();
+    let dash = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Line { dash, .. } | ElementKind::Rectangle { dash, .. } | ElementKind::Ellipse { dash, .. }) => {
+            dash.map(|d| d.steps().to_vec())
+        }
+        _ => panic!("a line or a shape"),
+    };
+    let add = |s: &mut Session, p: Value| s.run("layout.addElement", &p).unwrap()["element"].as_u64().unwrap() as u32;
+    let arrow = add(&mut s, json!({"kind": "arrow", "dash": [4, 2]}));
+    let study = add(&mut s, json!({"kind": "rectangle", "x": 20, "y": 20, "w": 40, "h": 30, "dash": [3]}));
+    let circle = add(&mut s, json!({"kind": "circle", "dash": [1, 2]}));
+    let plain = add(&mut s, json!({"kind": "line"}));
+    assert_eq!(
+        (dash(&s, arrow), dash(&s, study), dash(&s, circle), dash(&s, plain)),
+        (Some(vec![4.0, 2.0]), Some(vec![3.0]), Some(vec![1.0, 2.0]), None)
+    );
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&saved).unwrap();
+    assert_eq!(back, s.project.layouts[0]);
+    // Changed, made solid with [] or null, and left alone by an update that doesn't give it.
+    s.run("layout.update", &json!({"element": plain, "dash": [4, 2, 1, 2]})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "width": 3})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "dash": []})).unwrap();
+    s.run("layout.update", &json!({"element": circle, "dash": null})).unwrap();
+    assert_eq!((dash(&s, plain), dash(&s, circle)), (None, None));
+    // Not a pattern: refused, said, nothing changed.
+    for bad in [json!("4 2"), json!(["a"]), json!([-1]), json!([0, 0]), json!([1, 1, 1, 1, 1, 1, 1, 1, 1]), json!([501])] {
+        let err = s.run("layout.update", &json!({"element": study, "dash": bad, "width": 5})).unwrap_err();
+        assert!(err.starts_with("dash is a list"), "{bad}: {err}");
+        assert!(s.run("layout.addElement", &json!({"kind": "line", "dash": bad})).is_err());
+    }
+    assert_eq!(dash(&s, study), Some(vec![3.0]));
+    // Only lines and shapes draw one.
+    let text = add(&mut s, json!({"kind": "text", "text": "Área de estudo"}));
+    assert!(s.run("layout.update", &json!({"element": text, "dash": [4, 2]})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "dash": [4, 2]})).unwrap_err().contains("dash"));
+    // Solid asked for with null is refused there too, not ignored.
+    assert!(s.run("layout.update", &json!({"element": text, "dash": null})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "text", "dash": null})).unwrap_err().contains("dash"));
+    // Locked, even a solid one asked for with null is refused.
+    s.run("layout.update", &json!({"element": arrow, "locked": true})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": arrow, "dash": null})).unwrap_err().contains("locked"));
+    assert_eq!(dash(&s, arrow), Some(vec![4.0, 2.0]));
 }
 
 /// Text elements turn by `rotation` (#1763): in degrees clockwise, kept within -180 to 180, not
@@ -40779,6 +40835,15 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         let run = crate::cmd::exports::export_start(&mut s, command, p).unwrap_or_else(|e| panic!("{command}: {e}"));
         let control = Control::cancelled_once_started();
         note(command, run.run(&control).map(|_| ()), &control);
+    }
+
+    // The Add Service dialog replays supplied metadata off the desktop frame too.
+    let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","text":"{\"collections\":[]}"});
+    for command in ["service.layers", "service.add"] {
+        let read = crate::cmd::reads::read_ahead(&mut s, command, &params).unwrap();
+        assert!(read.reads());
+        let control = Control::cancelled_once_started();
+        note(command, read.run(&control).map(|_| ()), &control);
     }
 
     // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
